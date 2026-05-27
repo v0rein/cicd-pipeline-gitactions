@@ -306,24 +306,16 @@ jobs:
   # ── S7: CD — Deploy ke Kubernetes ───────────────────────────────────────────
   deploy:
     name: "Deploy ke Kubernetes"
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [build-and-push, smoke-test]
     if: github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout kode
         uses: actions/checkout@v4
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'latest'
-
-      - name: Konfigurasi kubeconfig
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
 
       - name: Update image di Deployment
         run: |
