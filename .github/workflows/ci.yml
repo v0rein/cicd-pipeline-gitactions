@@ -309,9 +309,6 @@ jobs:
     runs-on: self-hosted
     needs: [build-and-push, smoke-test]
     if: github.ref == 'refs/heads/main'
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout kode
@@ -319,26 +316,22 @@ jobs:
 
       - name: Update image di Deployment
         run: |
-          IMAGE="ghcr.io/${{ github.repository_owner }}/taskflow-api:sha-${GITHUB_SHA::7}"
+          $SHORT_SHA = "${{ github.sha }}".Substring(0, 7)
+          $IMAGE = "ghcr.io/${{ github.repository_owner }}/taskflow-api:sha-$SHORT_SHA"
           echo "→ Deploy image: $IMAGE"
 
-          kubectl set image deployment/taskflow-api \
-            taskflow-api=$IMAGE \
-            -n taskflow-prod
+          kubectl set image deployment/taskflow-api taskflow-api=$IMAGE -n taskflow-prod
 
       - name: Tunggu rollout selesai
         run: |
-          kubectl rollout status deployment/taskflow-api \
-            -n taskflow-prod \
-            --timeout=120s
+          kubectl rollout status deployment/taskflow-api -n taskflow-prod --timeout=120s
 
       - name: Verifikasi deployment
         run: |
           echo "→ Status Pod setelah deploy:"
           kubectl get pods -n taskflow-prod
           echo "→ Image yang berjalan:"
-          kubectl get deployment taskflow-api -n taskflow-prod \
-            -o jsonpath='{.spec.template.spec.containers[0].image}'
+          kubectl get deployment taskflow-api -n taskflow-prod -o jsonpath="{.spec.template.spec.containers[0].image}"
           echo ""
           echo "✅ Deploy berhasil!"
 
