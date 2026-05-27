@@ -356,8 +356,92 @@ func contains(s, substr string) bool {
 }
 
 // ── [TODO] Wajib Ditambah Mahasiswa ─────────────────────────────────────────
-// TODO: Tambahkan minimal 2 test baru:
-// - TestListTasks_WithStatusFilter (GET /api/v1/tasks?status=done)
-// - TestUpdateTask_TitleOnly (update hanya title tanpa ubah status)
-// - TestStats_ConsistencyWithTaskList (total di /stats == total di /tasks)
-// - TestCreateMultipleTasks_UniqueIDs (50 task, semua ID unik)
+
+func TestListTasks_WithStatusFilter(t *testing.T) {
+	srv := newServer(t)
+	defer srv.Close()
+
+	doRequest(t, srv, http.MethodPost, "/api/v1/tasks", map[string]string{"title": "Task A"})
+	respB := doRequest(t, srv, http.MethodPost, "/api/v1/tasks", map[string]string{"title": "Task B"})
+	var taskB model.Task
+	decodeBody(t, respB, &taskB)
+	
+	// Update Task B to done
+	doRequest(t, srv, http.MethodPut, "/api/v1/tasks/"+taskB.ID, map[string]string{"status": "done"})
+
+	// Get tasks with status=done
+	getResp := doRequest(t, srv, http.MethodGet, "/api/v1/tasks?status=done", nil)
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d, want 200", getResp.StatusCode)
+	}
+	var data map[string]interface{}
+	decodeBody(t, getResp, &data)
+	tasksData := data["tasks"].([]interface{})
+	if len(tasksData) != 1 {
+		t.Errorf("diharapkan 1 task dengan status done, tapi mendapat %d", len(tasksData))
+	}
+}
+
+func TestUpdateTask_TitleOnly(t *testing.T) {
+	srv := newServer(t)
+	defer srv.Close()
+
+	resp := doRequest(t, srv, http.MethodPost, "/api/v1/tasks", map[string]string{"title": "Original Title"})
+	var task model.Task
+	decodeBody(t, resp, &task)
+
+	upResp := doRequest(t, srv, http.MethodPut, "/api/v1/tasks/"+task.ID, map[string]string{"title": "Updated Title"})
+	if upResp.StatusCode != http.StatusOK {
+		t.Fatalf("update status = %d, want 200", upResp.StatusCode)
+	}
+	
+	getResp := doRequest(t, srv, http.MethodGet, "/api/v1/tasks/"+task.ID, nil)
+	var updatedTask model.Task
+	decodeBody(t, getResp, &updatedTask)
+	
+	if updatedTask.Title != "Updated Title" {
+		t.Errorf("title gagal diupdate: %s", updatedTask.Title)
+	}
+	if updatedTask.Status != "todo" {
+		t.Errorf("status seharusnya tetap todo, tapi berubah menjadi: %s", updatedTask.Status)
+	}
+}
+
+func TestStats_ConsistencyWithTaskList(t *testing.T) {
+	srv := newServer(t)
+	defer srv.Close()
+
+	for i := 0; i < 3; i++ {
+		doRequest(t, srv, http.MethodPost, "/api/v1/tasks", map[string]string{"title": "Task"})
+	}
+
+	tasksResp := doRequest(t, srv, http.MethodGet, "/api/v1/tasks", nil)
+	var data map[string]interface{}
+	decodeBody(t, tasksResp, &data)
+	tasksList := data["tasks"].([]interface{})
+
+	statsResp := doRequest(t, srv, http.MethodGet, "/api/v1/stats", nil)
+	var stats model.StatsResponse
+	decodeBody(t, statsResp, &stats)
+
+	if stats.Total != len(tasksList) {
+		t.Errorf("stats.Total (%d) tidak sama dengan jumlah list task (%d)", stats.Total, len(tasksList))
+	}
+}
+
+func TestCreateMultipleTasks_UniqueIDs(t *testing.T) {
+	srv := newServer(t)
+	defer srv.Close()
+
+	ids := make(map[string]bool)
+	for i := 0; i < 50; i++ {
+		resp := doRequest(t, srv, http.MethodPost, "/api/v1/tasks", map[string]string{"title": "Task"})
+		var task model.Task
+		decodeBody(t, resp, &task)
+		
+		if ids[task.ID] {
+			t.Errorf("ditemukan ID duplikat: %s", task.ID)
+		}
+		ids[task.ID] = true
+	}
+}

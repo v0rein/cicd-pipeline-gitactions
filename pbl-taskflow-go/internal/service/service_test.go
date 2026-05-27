@@ -328,3 +328,21 @@ func TestDelete_AndVerifyStats(t *testing.T) {
 		t.Errorf("CompletionRate = %.2f, want 50.00", stats.CompletionRate)
 	}
 }
+
+// ── Test Baru: GetAll ────────────────────────────────────────────────────────
+
+func TestGetAll(t *testing.T) {
+	svc := newSvc()
+	
+	// Create tasks
+	svc.Create(model.CreateTaskRequest{Title: "Task A"})
+	svc.Create(model.CreateTaskRequest{Title: "Task B"})
+	
+	tasks, err := svc.GetAll("")
+	if err != nil {
+		t.Fatalf("GetAll() error = %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("GetAll() returned %d tasks, want 2", len(tasks))
+	}
+}

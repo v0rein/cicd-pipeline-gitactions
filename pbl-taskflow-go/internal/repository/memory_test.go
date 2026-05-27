@@ -219,3 +219,28 @@ func TestCount_AfterDelete(t *testing.T) {
 		t.Errorf("Count setelah hapus ID invalid = %d, want 3", count)
 	}
 }
+
+// ── Test Baru: Clear, Close, String ────────────────────────────────────────
+
+func TestMemoryRepository_Misc(t *testing.T) {
+	repo := newRepo(t)
+	saveTask(t, repo, "t1", "Task", model.StatusTodo)
+
+	// Test String
+	str := repo.String()
+	if str == "" {
+		t.Error("String() seharusnya tidak kosong")
+	}
+
+	// Test Close
+	if err := repo.Close(); err != nil {
+		t.Errorf("Close() seharusnya tidak error: %v", err)
+	}
+
+	// Test Clear
+	repo.Clear()
+	count, _ := repo.Count()
+	if count != 0 {
+		t.Errorf("Setelah Clear(), count seharusnya 0, dapat %d", count)
+	}
+}
