@@ -1,0 +1,299 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# GitHub Actions CI/CD Pipeline — TaskFlow API
+# Kelompok 1: GitHub Actions + GHCR
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: TaskFlow CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  GO_VERSION: "1.22"
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/taskflow-api
+  WORKING_DIR: pbl-taskflow-go
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── S2: CI — Lint (go vet) ──────────────────────────────────────────────────
+  lint:
+    name: "Lint (go vet)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Go Vet
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          go mod tidy
+          go vet ./...
+
+  # ── S2: CI — Unit Test + Race Detector ──────────────────────────────────────
+  test:
+    name: "Unit Test + Race Detector"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run Unit Tests with Race Detector
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          go mod tidy
+          go test -race ./... -v -timeout 30s
+
+      - name: Coverage Report + Gate (≥ 75%)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          go test ./... -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out
+
+          # Ambil total coverage dan cek ≥ 75%
+          TOTAL_COV=$(go tool cover -func coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "📊 Total Coverage: ${TOTAL_COV}%"
+
+          awk -v cov="$TOTAL_COV" 'BEGIN {
+            if (cov+0 < 75) {
+              printf "❌ Coverage %.1f%% di bawah minimum 75%%!\n", cov
+              exit 1
+            } else {
+              printf "✅ Coverage %.1f%% memenuhi minimum 75%%\n", cov
+            }
+          }'
+
+      - name: Upload Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ env.WORKING_DIR }}/coverage.out
+
+  # ── S2: CI — Integration Test (PostgreSQL) ──────────────────────────────────
+  integration-test:
+    name: "Integration Test (PostgreSQL)"
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: taskflow
+          POSTGRES_USER: taskflow
+          POSTGRES_PASSWORD: taskflow_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taskflow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run Integration Tests
+        working-directory: ${{ env.WORKING_DIR }}
+        env:
+          DATABASE_URL: postgres://taskflow:taskflow_secret@localhost:5432/taskflow?sslmode=disable
+        run: |
+          go mod tidy
+          go test -tags=integration -race ./... -v -timeout 60s
+
+  # ── S3: CD — Docker Build + Push ke GHCR ────────────────────────────────────
+  build-and-push:
+    name: "Docker Build + Push GHCR"
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration-test]    # CD hanya setelah CI sukses
+    if: github.event_name == 'push'          # Tidak jalan untuk PR
+    outputs:
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tags
+        id: meta
+        run: |
+          SHA_TAG="sha-$(echo $GITHUB_SHA | head -c 7)"
+          echo "sha_tag=$SHA_TAG" >> $GITHUB_OUTPUT
+          echo "📦 Image tag: $SHA_TAG"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          SHA_TAG="${{ steps.meta.outputs.sha_tag }}"
+
+          echo "→ Building image..."
+          docker build \
+            -t ${{ env.IMAGE_NAME }}:${SHA_TAG} \
+            -t ${{ env.IMAGE_NAME }}:latest \
+            .
+
+          echo "→ Image size:"
+          docker images ${{ env.IMAGE_NAME }}:${SHA_TAG} --format "  {{.Repository}}:{{.Tag}} — {{.Size}}"
+
+          echo "→ Pushing to GHCR..."
+          docker push ${{ env.IMAGE_NAME }}:${SHA_TAG}
+          docker push ${{ env.IMAGE_NAME }}:latest
+
+  # ── S4: Smoke Test + Tag Stable ─────────────────────────────────────────────
+  smoke-test:
+    name: "Smoke Test + Tag Stable"
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and Run Container
+        run: |
+          SHA_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          echo "→ Running ${{ env.IMAGE_NAME }}:${SHA_TAG}"
+          docker pull ${{ env.IMAGE_NAME }}:${SHA_TAG}
+          docker run -d --name taskflow-smoke \
+            -p 8080:8080 \
+            ${{ env.IMAGE_NAME }}:${SHA_TAG}
+
+          echo "⏳ Menunggu server siap..."
+          sleep 10
+
+      - name: Smoke Test — /health
+        run: |
+          echo "→ Testing /health..."
+          curl -sf http://localhost:8080/health | jq .
+          echo "✅ Health check PASSED"
+
+      - name: Smoke Test — /api/v1/stats
+        run: |
+          echo "→ Testing /api/v1/stats..."
+          curl -sf http://localhost:8080/api/v1/stats | jq .
+          echo "✅ Stats endpoint PASSED"
+
+      - name: Tag as Stable (smoke test passed)
+        run: |
+          SHA_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          echo "→ Tagging ${SHA_TAG} as stable..."
+          docker tag ${{ env.IMAGE_NAME }}:${SHA_TAG} ${{ env.IMAGE_NAME }}:stable
+          docker push ${{ env.IMAGE_NAME }}:stable
+          echo "✅ Tag stable berhasil!"
+
+      - name: Cleanup
+        if: always()
+        run: docker stop taskflow-smoke 2>/dev/null || true
+
+  # ── S6: Security Scan — SAST (gosec) ────────────────────────────────────────
+  security-sast:
+    name: "Security: SAST (gosec)"
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install & Run gosec
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -fmt json -out gosec-report.json ./... || true
+          gosec -fmt text ./... || true
+          echo "📄 gosec report generated"
+
+      - name: Upload SAST Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gosec-sast-report
+          path: ${{ env.WORKING_DIR }}/gosec-report.json
+
+  # ── S6: Security Scan — SCA (trivy fs) ──────────────────────────────────────
+  security-sca:
+    name: "Security: SCA (trivy)"
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy FS Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: ${{ env.WORKING_DIR }}
+          format: 'json'
+          output: 'trivy-sca-report.json'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Upload SCA Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-sca-report
+          path: trivy-sca-report.json
+
+  # ── S4: Notification (Telegram) ─────────────────────────────────────────────
+  notify-success:
+    name: "Notify Success ✅"
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration-test, build-and-push, smoke-test]
+    if: success()
+    steps:
+      - name: Send Telegram Success Notification
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            -d text="✅ *Pipeline SUCCESS*
+          *Repo:* ${{ github.repository }}
+          *Branch:* ${{ github.ref_name }}
+          *Commit:* \`$(echo ${{ github.sha }} | head -c 7)\`
+          *Author:* ${{ github.actor }}
+          *Time:* $(date '+%Y-%m-%d %H:%M:%S UTC')
+          [🔗 Lihat Pipeline](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+  notify-failure:
+    name: "Notify Failure ❌"
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration-test, build-and-push, smoke-test]
+    if: failure()
+    steps:
+      - name: Send Telegram Failure Notification
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            -d text="❌ *Pipeline FAILED*
+          *Repo:* ${{ github.repository }}
+          *Branch:* ${{ github.ref_name }}
+          *Commit:* \`$(echo ${{ github.sha }} | head -c 7)\`
+          *Author:* ${{ github.actor }}
+          *Time:* $(date '+%Y-%m-%d %H:%M:%S UTC')
+          [🔗 Lihat Detail Error](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"

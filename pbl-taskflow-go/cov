@@ -1,0 +1,5 @@
+mode: set
+github.com/taskflow/api/internal/validator/validator.go:10.37,18.2 2 1
+github.com/taskflow/api/internal/validator/validator.go:21.35,28.2 2 1
+github.com/taskflow/api/internal/validator/validator.go:31.32,33.2 1 1
+github.com/taskflow/api/internal/validator/validator.go:36.40,38.2 1 1
